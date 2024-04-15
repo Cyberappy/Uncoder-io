@@ -55,6 +55,13 @@ class RawQueryContainer:
 
 
 @dataclass
+class RawQueryDictContainer:
+    query: dict
+    language: str
+    meta_info: dict
+
+
+@dataclass
 class TokenizedQueryContainer:
     tokens: list[TOKEN_TYPE]
     meta_info: MetaInfoContainer

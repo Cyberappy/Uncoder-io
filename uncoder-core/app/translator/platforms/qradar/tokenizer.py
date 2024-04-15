@@ -15,9 +15,8 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 -----------------------------------------------------------------
 """
-
 import re
-from typing import Any, ClassVar, Union
+from typing import Any, ClassVar, Union, Tuple, OrderedDict
 
 from app.translator.core.custom_types.tokens import OperatorType
 from app.translator.core.custom_types.values import ValueType
@@ -36,7 +35,7 @@ class QradarTokenizer(QueryTokenizer):
         "<": OperatorType.LT,
         ">=": OperatorType.GTE,
         ">": OperatorType.GT,
-        "!=": OperatorType.NOT_EQ,
+        "!=": OperatorType.NEQ,
         "like": OperatorType.EQ,
         "ilike": OperatorType.EQ,
         "matches": OperatorType.REGEX,
@@ -83,3 +82,50 @@ class QradarTokenizer(QueryTokenizer):
         keyword = Keyword(value=value.strip(self.wildcard_symbol))
         pos = keyword_search.end()
         return keyword, query[pos:]
+
+
+class QradarRuleTokenizer(QueryTokenizer):
+    single_value_operators_map: ClassVar[dict[str, str]] = {
+        "=": OperatorType.EQ,
+    }
+    field_pattern = r'(?P<field_name>[^\.]+$)'
+    _value_pattern = "value"
+
+    def tokenize(self, query: dict, rule_meta: dict) -> Tuple[list[Union[FieldValue, Keyword, Identifier]], dict]:
+        tokenized = []
+        logsources = []
+        if isinstance(query["rule"]["testDefinitions"]["test"], OrderedDict):
+            rule_structure = query["rule"]["testDefinitions"]["test"]
+            if not self.check_for_logsource(rule_structure, rule_meta, logsources):
+                tokenized.append(self.parse_field_value(rule_structure))
+        elif isinstance(query["rule"]["testDefinitions"]["test"], list):
+            for rule_structure in query["rule"]["testDefinitions"]["test"]:
+                if not self.check_for_logsource(rule_structure, rule_meta, logsources):
+                    tokenized.append(self.parse_field_value(rule_structure))
+        return tokenized, {"devicetype": logsources, "table": "default"}
+
+    def check_for_logsource(self, rule_structure, rule_meta, logsources):
+        if "DeviceTypeID" in rule_structure.get("@name", "") or "DeviceID" in rule_structure.get("@name", ""):
+            logsources.extend(self.get_logsource_info(rule_structure["parameter"]["userSelection"], rule_meta))
+            return True
+
+    def search_field(self, query: str) -> str:
+        field = super().search_field(query)
+        return re.sub('_Test$', '', field)
+
+    def get_logsource_info(self, user_selections, rule_data):
+        if isinstance(rule_data["sensordevicetype"], list):
+            return [i['devicetypedescription'] for i in rule_data["sensordevicetype"] if i["id"] in user_selections]
+        if rule_data["sensordevicetype"]["id"] == user_selections:
+            return [rule_data["sensordevicetype"]["devicetypedescription"]]
+
+    def parse_field_value(self, rule_structure):
+        negate = rule_structure.get("@negate", False) if not isinstance(rule_structure, list) else False
+        field_name = self.search_field(rule_structure.get("@name", ""))
+        if isinstance(rule_structure["parameter"], list):
+            rule_structure["parameter"] = rule_structure["parameter"][0]
+        if rule_structure["parameter"]["userSelection"]:
+            value = [i.strip() for i in rule_structure["parameter"]["userSelection"].split(",")]
+        else:
+            value = None
+        return FieldValue(source_name=field_name, operator=Identifier(token_type="="), value=value)

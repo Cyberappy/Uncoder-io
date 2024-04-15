@@ -1,3 +1,4 @@
+from app.translator.platforms.arcsight.renders.arcsight_cti import ArcsightKeyword
 from app.translator.platforms.athena.parsers.athena import AthenaQueryParser
 from app.translator.platforms.athena.renders.athena import AthenaQueryRender
 from app.translator.platforms.athena.renders.athena_cti import AthenaCTI
@@ -44,6 +45,7 @@ from app.translator.platforms.opensearch.renders.opensearch import OpenSearchQue
 from app.translator.platforms.opensearch.renders.opensearch_cti import OpenSearchCTI
 from app.translator.platforms.opensearch.renders.opensearch_rule import OpenSearchRuleRender
 from app.translator.platforms.qradar.parsers.qradar import QradarQueryParser
+from app.translator.platforms.qradar.parsers.qradar_rule import QradarRuleParser
 from app.translator.platforms.qradar.renders.qradar import QradarQueryRender
 from app.translator.platforms.qradar.renders.qradar_cti import QRadarCTI
 from app.translator.platforms.qualys.renders.qualys_cti import QualysCTI
@@ -105,6 +107,7 @@ __ALL_PARSERS = (
     ElasticSearchRuleParser(),
     OpenSearchQueryParser(),
     GraylogQueryParser(),
+    QradarRuleParser(),
 )
 
 
@@ -113,6 +116,7 @@ __ALL_RENDERS_CTI = (
     MicrosoftDefenderCTI(),
     QRadarCTI(),
     SplunkCTI(),
+    ArcsightKeyword(),
     ChronicleQueryCTI(),
     CrowdStrikeCTI(),
     SumologicCTI(),
