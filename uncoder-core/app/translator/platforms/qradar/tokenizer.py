@@ -1,131 +1,168 @@
-"""
-Uncoder IO Commercial Edition License
------------------------------------------------------------------
-Copyright (c) 2024 SOC Prime, Inc.
-
-This file is part of the Uncoder IO Commercial Edition ("CE") and is
-licensed under the Uncoder IO Non-Commercial License (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    https://github.com/UncoderIO/UncoderIO/blob/main/LICENSE
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
------------------------------------------------------------------
-"""
 import re
-from typing import Any, ClassVar, Union, Tuple, OrderedDict
+from collections import OrderedDict
+from os.path import abspath, dirname
+from typing import ClassVar, Union
 
 from app.translator.core.custom_types.tokens import OperatorType
-from app.translator.core.custom_types.values import ValueType
+from app.translator.core.exceptions.parser import UnknownOperatorException, UnsupportedRuleException
 from app.translator.core.models.field import FieldValue, Keyword
 from app.translator.core.models.identifier import Identifier
-from app.translator.core.tokenizer import QueryTokenizer
-from app.translator.platforms.qradar.const import NUM_VALUE_PATTERN, SINGLE_QUOTES_VALUE_PATTERN, UTF8_PAYLOAD_PATTERN
-from app.translator.platforms.qradar.escape_manager import qradar_escape_manager
-from app.translator.tools.utils import get_match_group
-
-
-class QradarTokenizer(QueryTokenizer):
-    single_value_operators_map: ClassVar[dict[str, str]] = {
-        "=": OperatorType.EQ,
-        "<=": OperatorType.LTE,
-        "<": OperatorType.LT,
-        ">=": OperatorType.GTE,
-        ">": OperatorType.GT,
-        "!=": OperatorType.NEQ,
-        "like": OperatorType.EQ,
-        "ilike": OperatorType.EQ,
-        "matches": OperatorType.REGEX,
-        "imatches": OperatorType.REGEX,
-    }
-    multi_value_operators_map: ClassVar[dict[str, str]] = {"in": OperatorType.EQ}
-
-    field_pattern = r'(?P<field_name>"[a-zA-Z\._\-\s]+"|[a-zA-Z\._\-]+)'
-    bool_value_pattern = rf"(?P<{ValueType.bool_value}>true|false)\s*"
-    _value_pattern = rf"{NUM_VALUE_PATTERN}|{bool_value_pattern}|{SINGLE_QUOTES_VALUE_PATTERN}"
-    multi_value_pattern = rf"""\((?P<{ValueType.multi_value}>[:a-zA-Z\"\*0-9=+%#\-_\/\\'\,.&^@!\(\s]*)\)"""
-    keyword_pattern = rf"{UTF8_PAYLOAD_PATTERN}\s+(?:like|LIKE|ilike|ILIKE)\s+{SINGLE_QUOTES_VALUE_PATTERN}"
-    escape_manager = qradar_escape_manager
-
-    wildcard_symbol = "%"
-
-    @staticmethod
-    def should_process_value_wildcards(operator: str) -> bool:
-        return operator.lower() in ("like", "ilike")
-
-    def get_operator_and_value(self, match: re.Match, operator: str = OperatorType.EQ) -> tuple[str, Any]:
-        if (num_value := get_match_group(match, group_name=ValueType.number_value)) is not None:
-            return operator, num_value
-
-        if (bool_value := get_match_group(match, group_name=ValueType.bool_value)) is not None:
-            return operator, self.escape_manager.remove_escape(bool_value)
-
-        if (s_q_value := get_match_group(match, group_name=ValueType.single_quotes_value)) is not None:
-            return operator, self.escape_manager.remove_escape(s_q_value)
-
-        return super().get_operator_and_value(match, operator)
-
-    def escape_field_name(self, field_name: str) -> str:
-        return field_name.replace('"', r"\"").replace(" ", r"\ ")
-
-    @staticmethod
-    def create_field_value(field_name: str, operator: Identifier, value: Union[str, list]) -> FieldValue:
-        field_name = field_name.strip('"')
-        return FieldValue(source_name=field_name, operator=operator, value=value)
-
-    def search_keyword(self, query: str) -> tuple[Keyword, str]:
-        keyword_search = re.search(self.keyword_pattern, query)
-        _, value = self.get_operator_and_value(keyword_search)
-        keyword = Keyword(value=value.strip(self.wildcard_symbol))
-        pos = keyword_search.end()
-        return keyword, query[pos:]
+from app.translator.core.models.query_container import RawQueryContainer
+from app.translator.core.tokenizer import TOKEN_TYPE, QueryTokenizer
+from app.translator.platforms.base.aql.parsers.aql import AQLQueryParser
+from app.translator.platforms.qradar.const import qradar_query_details
+from app.translator.platforms.qradar.tools import (
+    first_condition_check,
+    get_qid_value,
+    parse_ariel_filter,
+    source_and_destination_ips,
+)
 
 
 class QradarRuleTokenizer(QueryTokenizer):
     single_value_operators_map: ClassVar[dict[str, str]] = {
-        "=": OperatorType.EQ,
+        "NEQany": OperatorType.NOT_EQ,
+        "NEQ": OperatorType.NOT_EQ,
+        "EQany": OperatorType.EQ,
+        "NCONany": OperatorType.NOT_CONTAINS,
+        "CONany": OperatorType.CONTAINS,
+        "NREXany": OperatorType.NOT_REGEX,
+        "REXany": OperatorType.REGEX,
+        "contains": OperatorType.CONTAINS,
+        "contain": OperatorType.CONTAINS,
+        "notEquals": OperatorType.NOT_EQ,
+        "not equals": OperatorType.NOT_EQ,
+        "equals": OperatorType.EQ,
+        "EQ": OperatorType.EQ,
     }
-    field_pattern = r'(?P<field_name>[^\.]+$)'
+    multi_value_operators_map: ClassVar[dict[str, str]] = {
+        "is any of": OperatorType.EQ,
+        "any": OperatorType.EQ,
+        "is one of the following": OperatorType.EQ,
+        "any of the following": OperatorType.EQ,
+        "is not any of": OperatorType.NOT_EQ,
+        "contains any of": OperatorType.CONTAINS,
+        "contain any of": OperatorType.CONTAINS,
+        "does not contains any of": OperatorType.NOT_CONTAINS,
+        "does not contain any of": OperatorType.NOT_CONTAINS,
+        "matches any of expressions": OperatorType.REGEX,
+        "does not match any of expressions": OperatorType.NOT_REGEX,
+    }
+    fields_operator_map: ClassVar[dict[str, str]] = {"NENA": OperatorType.IS_NOT_NONE, "ENA": OperatorType.IS_NONE}
+    aql_parser = AQLQueryParser()
+    field_pattern = r"(?P<field_name>(?<=tests\.).*)"
     _value_pattern = "value"
+    logsource_ids = [13, 14]
+    default_parser = [2, 3, 4, 5, 8, 10, 11]
+    qid_mapping_path = dirname(abspath(__file__)) + "/qid_mapping.db"
 
-    def tokenize(self, query: dict, rule_meta: dict) -> Tuple[list[Union[FieldValue, Keyword, Identifier]], dict]:
+    def tokenize(self, query: dict) -> tuple[list[Union[FieldValue, Keyword, Identifier]], dict]:
+        query_test = query["content"]["custom_rule"]["rule"]["testDefinitions"]["test"]
         tokenized = []
         logsources = []
-        if isinstance(query["rule"]["testDefinitions"]["test"], OrderedDict):
-            rule_structure = query["rule"]["testDefinitions"]["test"]
-            if not self.check_for_logsource(rule_structure, rule_meta, logsources):
-                tokenized.append(self.parse_field_value(rule_structure))
-        elif isinstance(query["rule"]["testDefinitions"]["test"], list):
-            for rule_structure in query["rule"]["testDefinitions"]["test"]:
-                if not self.check_for_logsource(rule_structure, rule_meta, logsources):
-                    tokenized.append(self.parse_field_value(rule_structure))
-        return tokenized, {"devicetype": logsources, "table": "default"}
+        if isinstance(query_test, (OrderedDict, dict)):
+            self._parse_condition(query_test, tokenized, logsources)
+        elif isinstance(query_test, list):
+            first_condition = True
+            for rule_structure in query_test:
+                tokenized.extend(first_condition_check(first_condition, rule_structure.get("@negate", False)))
+                self._parse_condition(rule_structure, tokenized, logsources)
+                first_condition = False
+        return tokenized, {"devicetype": logsources}
 
-    def check_for_logsource(self, rule_structure, rule_meta, logsources):
-        if "DeviceTypeID" in rule_structure.get("@name", "") or "DeviceID" in rule_structure.get("@name", ""):
-            logsources.extend(self.get_logsource_info(rule_structure["parameter"]["userSelection"], rule_meta))
-            return True
-
-    def search_field(self, query: str) -> str:
-        field = super().search_field(query)
-        return re.sub('_Test$', '', field)
-
-    def get_logsource_info(self, user_selections, rule_data):
-        if isinstance(rule_data["sensordevicetype"], list):
-            return [i['devicetypedescription'] for i in rule_data["sensordevicetype"] if i["id"] in user_selections]
-        if rule_data["sensordevicetype"]["id"] == user_selections:
-            return [rule_data["sensordevicetype"]["devicetypedescription"]]
-
-    def parse_field_value(self, rule_structure):
-        negate = rule_structure.get("@negate", False) if not isinstance(rule_structure, list) else False
-        field_name = self.search_field(rule_structure.get("@name", ""))
-        if isinstance(rule_structure["parameter"], list):
-            rule_structure["parameter"] = rule_structure["parameter"][0]
-        if rule_structure["parameter"]["userSelection"]:
-            value = [i.strip() for i in rule_structure["parameter"]["userSelection"].split(",")]
+    def _parse_condition(self, rule_structure: dict, tokenized: list, logsources: list):
+        test_id = int(rule_structure["@id"])
+        if test_id in self.logsource_ids:
+            if rule_structure["parameter"]["userSelection"] not in logsources:
+                logsources.append(int(rule_structure["parameter"]["userSelection"]))
+                return
+        if hasattr(self, f"tokenize_{test_id}"):
+            tokens = getattr(self, f"tokenize_{test_id}")(rule_structure)
+        elif test_id in self.default_parser:
+            tokens = self.tokenize_default_field_value(rule_structure)
         else:
-            value = None
-        return FieldValue(source_name=field_name, operator=Identifier(token_type="="), value=value)
+            raise UnsupportedRuleException(rule_format=rule_structure.get("@name", ""))
+        tokenized.extend(tokens)
+
+    def search_field(self, rule_structure: dict) -> str:
+        field = super().search_field(rule_structure.get("@name", ""))
+        return re.sub("_Test$", "", field)
+
+    def search_operator(self, query: str, field_name: str) -> str:
+        for operator in self.operators_map:
+            if operator in query:
+                return self.operators_map[operator]
+        raise UnknownOperatorException(query=query)
+
+    def search_value(self, user_selection: Union[dict, list], regex=False) -> Union[list, str]:
+        user_selection = user_selection["userSelection"]
+        values = user_selection if regex else [selection.strip() for selection in user_selection.split(",")]
+        if values and len(values) == 1:
+            return values[0]
+        return values
+
+    def tokenize_default_field_value(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        field = self.search_field(rule_structure)
+        value = self.search_value(rule_structure["parameter"])
+        operator = self.search_operator(rule_structure["text"], "")
+        return [FieldValue(source_name=field, operator=Identifier(token_type=operator), value=value)]
+
+    def tokenize_source_destination_tests(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        value = self.search_value(rule_structure["parameter"])
+        operator = self.search_operator(rule_structure["text"], "")
+        return source_and_destination_ips(operator, value)
+
+    def tokenize_12(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: EitherHost_Test
+        return self.tokenize_source_destination_tests(rule_structure)
+
+    def tokenize_19(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: QID_TEST
+        field = self.search_field(rule_structure)
+        value = self.search_value(rule_structure["parameter"])
+        operator = self.search_operator(rule_structure["text"], "")
+        if isinstance(value, list):
+            value = [get_qid_value(self.qid_mapping_path, val) for val in value]
+        else:
+            value = get_qid_value(self.qid_mapping_path, value)
+        return [FieldValue(source_name=field, operator=Identifier(token_type=operator), value=value)]
+
+    def tokenize_222(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: SrcOrDestPort
+        return self.tokenize_source_destination_tests(rule_structure)
+
+    def tokenize_225(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: PropertyRegex
+        field = self.search_value(rule_structure["parameter"][0])
+        value = self.search_value(rule_structure["parameter"][1], True)
+        return [FieldValue(source_name=field, operator=Identifier(token_type=OperatorType.REGEX), value=value)]
+
+    def tokenize_226(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: PropertyHex
+        field = self.search_value(rule_structure["parameter"][0])
+        value = self.search_value(rule_structure["parameter"][1])
+        return [FieldValue(source_name=field, operator=Identifier(token_type=OperatorType.CONTAINS), value=value)]
+
+    def tokenize_316(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: ArielFilterTest
+        field, operator, values = parse_ariel_filter(rule_structure["parameter"][0]["userSelection"])
+        if operator in self.fields_operator_map.keys():
+            values = field
+        operator = self.search_operator(operator, "")
+        if "sourceOrDestinationIP" in field:
+            return source_and_destination_ips(operator, values)
+        else:
+            return [FieldValue(source_name=field, operator=Identifier(token_type=operator), value=values)]
+
+    def tokenize_320(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: AQL_Test
+        query = rule_structure.get("text").split("dynamic'>")[1].split("</a>")[0].replace("&quot;", '"')
+        container = RawQueryContainer(query=query, language=qradar_query_details.platform_id)
+        return self.aql_parser.parse(container).tokens
+
+    def tokenize_321(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+        # Test name: PropertyMatch_Test
+        field = self.search_value(rule_structure["parameter"][0])
+        operator = self.search_operator(rule_structure["parameter"][1]["userSelection"], "")
+        value = self.search_value(rule_structure["parameter"][2])
+        return [FieldValue(source_name=field, operator=Identifier(token_type=operator), value=value)]
