@@ -29,7 +29,7 @@ from app.translator.core.exceptions.parser import UnsupportedOperatorException
 from app.translator.core.functions import PlatformFunctions
 from app.translator.core.mapping import DEFAULT_MAPPING_NAME, BasePlatformMappings, LogSourceSignature, SourceMapping
 from app.translator.core.models.field import Field, FieldValue, Keyword
-from app.translator.core.models.functions.base import Function, RenderedFunctions
+from app.translator.core.models.functions.base import Function
 from app.translator.core.models.identifier import Identifier
 from app.translator.core.models.platform_details import PlatformDetails
 from app.translator.core.models.query_container import MetaInfoContainer, RawQueryContainer, TokenizedQueryContainer
@@ -59,6 +59,8 @@ class BaseQueryFieldValue(ABC):
             OperatorType.REGEX: self.regex_modifier,
             OperatorType.NOT_REGEX: self.not_regex_modifier,
             OperatorType.KEYWORD: self.keywords,
+            OperatorType.IS_NONE: self.is_none,
+            OperatorType.IS_NOT_NONE: self.is_not_none,
         }
         self.or_token = f" {or_token} "
 
@@ -107,6 +109,12 @@ class BaseQueryFieldValue(ABC):
     def keywords(self, field: str, value: DEFAULT_VALUE_TYPE) -> str:  # noqa: ARG002
         raise NotImplementedException
 
+    def is_none(self, field: str, value: DEFAULT_VALUE_TYPE) -> str:  # noqa: ARG002
+        raise NotImplementedException
+
+    def is_not_none(self, field: str, value: DEFAULT_VALUE_TYPE) -> str:  # noqa: ARG002
+        raise NotImplementedException
+
     def apply_value(self, value: Union[str, int], value_type: str = ValueType.value) -> Union[str, int]:
         return self.escape_manager.escape(value, value_type)
 
@@ -126,7 +134,7 @@ class PlatformQueryRender(QueryRender):
     mappings: BasePlatformMappings = None
     details: PlatformDetails = None
     is_strict_mapping = False
-    platform_functions: PlatformFunctions = PlatformFunctions()
+    platform_functions: PlatformFunctions = None
 
     or_token = "or"
     and_token = "and"
@@ -154,8 +162,8 @@ class PlatformQueryRender(QueryRender):
             return f"{log_source_signature!s} {self.and_token}"
         return ""
 
-    def generate_functions(self, functions: list[Function], source_mapping: SourceMapping) -> RenderedFunctions:
-        return self.platform_functions.render(functions, source_mapping)
+    def generate_functions(self, functions: list[Function], source_mapping: SourceMapping) -> str:
+        return self.platform_functions.render(functions, source_mapping) if self.platform_functions else ""
 
     def map_field(self, field: Field, source_mapping: SourceMapping) -> list[str]:
         generic_field_name = field.get_generic_field_name(source_mapping.source_id)
@@ -278,13 +286,12 @@ class PlatformQueryRender(QueryRender):
         for source_mapping in source_mappings:
             prefix = self.generate_prefix(source_mapping.log_source_signature)
             result = self.generate_query(tokens=query_container.tokens, source_mapping=source_mapping)
-            rendered_functions = self.generate_functions(query_container.functions.functions, source_mapping)
-            not_supported_functions = query_container.functions.not_supported + rendered_functions.not_supported
+
             finalized_query = self.finalize_query(
                 prefix=prefix,
                 query=result,
-                functions=rendered_functions.rendered,
-                not_supported_functions=not_supported_functions,
+                functions=self.generate_functions(query_container.functions.functions, source_mapping),
+                not_supported_functions=query_container.functions.not_supported,
                 meta_info=query_container.meta_info,
                 source_mapping=source_mapping,
             )
