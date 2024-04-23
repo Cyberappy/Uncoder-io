@@ -1,3 +1,4 @@
+import copy
 import re
 from collections import OrderedDict
 from os.path import abspath, dirname
@@ -53,31 +54,40 @@ class QradarRuleTokenizer(QueryTokenizer):
     field_pattern = r"(?P<field_name>(?<=tests\.).*)"
     _value_pattern = "value"
     logsource_ids = [13, 14]
-    default_parser = [2, 3, 4, 5, 8, 10, 11]
+    default_parser = [2, 3, 4, 5, 8, 9, 10, 11]
     qid_mapping_path = dirname(abspath(__file__)) + "/qid_mapping.db"
 
     def tokenize(self, query: dict) -> tuple[list[Union[FieldValue, Keyword, Identifier]], dict]:
-        query_test = query["content"]["custom_rule"]["rule"]["testDefinitions"]["test"]
+        # We check only first test
+        if isinstance(query["content"]["custom_rule"], list):
+            query_test = query["content"]["custom_rule"].pop(0)["rule_data"]["rule"]["testDefinitions"]["test"]
+        else:
+            query_test = query["content"]["custom_rule"]["rule_data"]["rule"]["testDefinitions"]["test"]
         tokenized = []
         logsources = []
         if isinstance(query_test, (OrderedDict, dict)):
-            self._parse_condition(query_test, tokenized, logsources)
+            self._parse_condition(query_test, query, tokenized, logsources)
         elif isinstance(query_test, list):
             first_condition = True
             for rule_structure in query_test:
                 tokenized.extend(first_condition_check(first_condition, rule_structure.get("@negate", False)))
-                self._parse_condition(rule_structure, tokenized, logsources)
-                first_condition = False
+                self._parse_condition(rule_structure, query, tokenized, logsources)
+                if first_condition and int(rule_structure["@id"]) not in self.logsource_ids:
+                    first_condition = False
         return tokenized, {"devicetype": logsources}
 
-    def _parse_condition(self, rule_structure: dict, tokenized: list, logsources: list):
+    def _parse_condition(self, rule_structure: dict, meta_info: dict, tokenized: list, logsources: list):
         test_id = int(rule_structure["@id"])
         if test_id in self.logsource_ids:
             if rule_structure["parameter"]["userSelection"] not in logsources:
                 logsources.append(int(rule_structure["parameter"]["userSelection"]))
                 return
         if hasattr(self, f"tokenize_{test_id}"):
-            tokens = getattr(self, f"tokenize_{test_id}")(rule_structure)
+            tokens = getattr(self, f"tokenize_{test_id}")(
+                rule_structure=rule_structure,
+                meta_info=meta_info,
+                logsources=logsources,
+            )
         elif test_id in self.default_parser:
             tokens = self.tokenize_default_field_value(rule_structure)
         else:
@@ -112,40 +122,60 @@ class QradarRuleTokenizer(QueryTokenizer):
         operator = self.search_operator(rule_structure["text"], "")
         return source_and_destination_ips(operator, value)
 
-    def tokenize_12(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+    def tokenize_12(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: EitherHost_Test
-        return self.tokenize_source_destination_tests(rule_structure)
+        return self.tokenize_source_destination_tests(kwargs["rule_structure"])
 
-    def tokenize_19(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+    def tokenize_19(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: QID_TEST
-        field = self.search_field(rule_structure)
-        value = self.search_value(rule_structure["parameter"])
-        operator = self.search_operator(rule_structure["text"], "")
+        field = self.search_field(kwargs["rule_structure"])
+        value = self.search_value(kwargs["rule_structure"]["parameter"])
+        operator = self.search_operator(kwargs["rule_structure"]["text"], "")
         if isinstance(value, list):
             value = [get_qid_value(self.qid_mapping_path, val) for val in value]
         else:
             value = get_qid_value(self.qid_mapping_path, value)
         return [FieldValue(source_name=field, operator=Identifier(token_type=operator), value=value)]
 
-    def tokenize_222(self, rule_structure: dict) -> list[TOKEN_TYPE]:
-        # Test name: SrcOrDestPort
-        return self.tokenize_source_destination_tests(rule_structure)
+    def tokenize_46(self, **kwargs) -> list[TOKEN_TYPE]:
+        # Test name: RuleMatch_Test
+        values = self.search_value(kwargs["rule_structure"]["parameter"][1])
+        if isinstance(values, str):
+            values = [values]
+        tokenized = []
+        for value in values:
+            for custom_rule in kwargs["meta_info"]["content"]["custom_rule"]:
+                if custom_rule.get("uuid", None) == value:
+                    query = copy.deepcopy(kwargs["meta_info"])
+                    query["content"]["custom_rule"][0] = custom_rule
+                    tokens, logsources = self.tokenize(query)
+                    if tokenized:
+                        tokenized.append(Identifier(token_type="and"))
+                    tokenized.extend(tokens)
+                    for logsource in logsources.get("devicetype", []):
+                        if logsource not in kwargs["logsources"]:
+                            kwargs["logsources"].append(logsource)
+        return tokenized
 
-    def tokenize_225(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+    def tokenize_222(self, **kwargs) -> list[TOKEN_TYPE]:
+        # Test name: SrcOrDestPort
+        return self.tokenize_source_destination_tests(kwargs["rule_structure"])
+
+    def tokenize_225(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: PropertyRegex
-        field = self.search_value(rule_structure["parameter"][0])
-        value = self.search_value(rule_structure["parameter"][1], True)
+        field = self.search_value(kwargs["rule_structure"]["parameter"][0])
+        value = self.search_value(kwargs["rule_structure"]["parameter"][1], True)
         return [FieldValue(source_name=field, operator=Identifier(token_type=OperatorType.REGEX), value=value)]
 
-    def tokenize_226(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+    def tokenize_226(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: PropertyHex
-        field = self.search_value(rule_structure["parameter"][0])
-        value = self.search_value(rule_structure["parameter"][1])
+        field = self.search_value(kwargs["rule_structure"]["parameter"][0])
+        value = self.search_value(kwargs["rule_structure"]["parameter"][1])
         return [FieldValue(source_name=field, operator=Identifier(token_type=OperatorType.CONTAINS), value=value)]
 
-    def tokenize_316(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+    def tokenize_316(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: ArielFilterTest
-        field, operator, values = parse_ariel_filter(rule_structure["parameter"][0]["userSelection"])
+        field, operator, values = parse_ariel_filter(kwargs["rule_structure"]["parameter"][0]["userSelection"])
         if operator in self.fields_operator_map.keys():
             values = field
         operator = self.search_operator(operator, "")
@@ -154,15 +184,15 @@ class QradarRuleTokenizer(QueryTokenizer):
         else:
             return [FieldValue(source_name=field, operator=Identifier(token_type=operator), value=values)]
 
-    def tokenize_320(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+    def tokenize_320(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: AQL_Test
-        query = rule_structure.get("text").split("dynamic'>")[1].split("</a>")[0].replace("&quot;", '"')
+        query = kwargs["rule_structure"].get("text").split("dynamic'>")[1].split("</a>")[0].replace("&quot;", '"')
         container = RawQueryContainer(query=query, language=qradar_query_details.platform_id)
         return self.aql_parser.parse(container).tokens
 
-    def tokenize_321(self, rule_structure: dict) -> list[TOKEN_TYPE]:
+    def tokenize_321(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: PropertyMatch_Test
-        field = self.search_value(rule_structure["parameter"][0])
-        operator = self.search_operator(rule_structure["parameter"][1]["userSelection"], "")
-        value = self.search_value(rule_structure["parameter"][2])
+        field = self.search_value(kwargs["rule_structure"]["parameter"][0])
+        operator = self.search_operator(kwargs["rule_structure"]["parameter"][1]["userSelection"], "")
+        value = self.search_value(kwargs["rule_structure"]["parameter"][2])
         return [FieldValue(source_name=field, operator=Identifier(token_type=operator), value=value)]
