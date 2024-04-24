@@ -66,33 +66,31 @@ class QradarRuleTokenizer(QueryTokenizer):
         tokenized = []
         logsources = []
         if isinstance(query_test, (OrderedDict, dict)):
-            self._parse_condition(query_test, query, tokenized, logsources)
+            tokenized.extend(self._parse_condition(query_test, query, logsources))
         elif isinstance(query_test, list):
             first_condition = True
             for rule_structure in query_test:
                 tokenized.extend(first_condition_check(first_condition, rule_structure.get("@negate", False)))
-                self._parse_condition(rule_structure, query, tokenized, logsources)
+                tokenized.extend(self._parse_condition(rule_structure, query, logsources))
                 if first_condition and int(rule_structure["@id"]) not in self.logsource_ids:
                     first_condition = False
         return tokenized, {"devicetype": logsources}
 
-    def _parse_condition(self, rule_structure: dict, meta_info: dict, tokenized: list, logsources: list):
+    def _parse_condition(self, rule_structure: dict, meta_info: dict, logsources: list) -> list[TOKEN_TYPE]:
         test_id = int(rule_structure["@id"])
         if test_id in self.logsource_ids:
             if rule_structure["parameter"]["userSelection"] not in logsources:
                 logsources.append(int(rule_structure["parameter"]["userSelection"]))
-                return
+                return []
         if hasattr(self, f"tokenize_{test_id}"):
-            tokens = getattr(self, f"tokenize_{test_id}")(
+            return getattr(self, f"tokenize_{test_id}")(
                 rule_structure=rule_structure,
                 meta_info=meta_info,
                 logsources=logsources,
             )
-        elif test_id in self.default_parser:
-            tokens = self.tokenize_default_field_value(rule_structure)
-        else:
-            raise UnsupportedRuleException(rule_format=rule_structure.get("@name", ""))
-        tokenized.extend(tokens)
+        if test_id in self.default_parser:
+            return self.tokenize_default_field_value(rule_structure)
+        raise UnsupportedRuleException(rule_format=rule_structure.get("@name", ""))
 
     def search_field(self, rule_structure: dict) -> str:
         field = super().search_field(rule_structure.get("@name", ""))
