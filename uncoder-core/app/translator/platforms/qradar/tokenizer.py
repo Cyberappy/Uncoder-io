@@ -120,6 +120,22 @@ class QradarRuleTokenizer(QueryTokenizer):
         operator = self.search_operator(rule_structure["text"], "")
         return source_and_destination_ips(operator, value)
 
+    def get_rule_match_data(self, values: list, core_logsources: list, meta_info: dict) -> list[TOKEN_TYPE]:
+        tokenized = []
+        for value in values:
+            for custom_rule in meta_info["content"]["custom_rule"]:
+                if custom_rule.get("uuid", None) == value:
+                    query = copy.deepcopy(meta_info)
+                    query["content"]["custom_rule"][0] = custom_rule
+                    tokens, logsources = self.tokenize(query)
+                    if tokenized:
+                        tokenized.append(Identifier(token_type="and"))
+                    tokenized.extend(tokens)
+                    for logsource in logsources.get("devicetype", []):
+                        if logsource not in core_logsources:
+                            core_logsources.append(logsource)
+        return tokenized
+
     def tokenize_12(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: EitherHost_Test
         return self.tokenize_source_destination_tests(kwargs["rule_structure"])
@@ -140,20 +156,11 @@ class QradarRuleTokenizer(QueryTokenizer):
         values = self.search_value(kwargs["rule_structure"]["parameter"][1])
         if isinstance(values, str):
             values = [values]
-        tokenized = []
-        for value in values:
-            for custom_rule in kwargs["meta_info"]["content"]["custom_rule"]:
-                if custom_rule.get("uuid", None) == value:
-                    query = copy.deepcopy(kwargs["meta_info"])
-                    query["content"]["custom_rule"][0] = custom_rule
-                    tokens, logsources = self.tokenize(query)
-                    if tokenized:
-                        tokenized.append(Identifier(token_type="and"))
-                    tokenized.extend(tokens)
-                    for logsource in logsources.get("devicetype", []):
-                        if logsource not in kwargs["logsources"]:
-                            kwargs["logsources"].append(logsource)
-        return tokenized
+        if isinstance(kwargs["meta_info"]["content"]["custom_rule"], list):
+            return self.get_rule_match_data(values, kwargs["logsources"], kwargs["meta_info"])
+        else:
+            field = self.search_field(kwargs["rule_structure"])
+            return [FieldValue(source_name=field, operator=Identifier(token_type=OperatorType.EQ), value=values)]
 
     def tokenize_222(self, **kwargs) -> list[TOKEN_TYPE]:
         # Test name: SrcOrDestPort
